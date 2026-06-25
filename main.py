@@ -15,10 +15,12 @@ else:
     CONFIG_MATRIX = []
     print("⚠️ Warning: COC_CONFIG_MATRIX environment variable not found!")
 
-COC_BASE_URL = "https://api.clashofclans.com/v1"
+# Note the base URL drops the "/v1" since the path will include it!
+COC_BASE_URL = "https://api.clashofclans.com"
 
-@app.api_route("/v1/{endpoint_type}/{encoded_tag}", methods=["GET", "POST"])
-async def forward_coc_request(endpoint_type: str, encoded_tag: str, request: Request):
+# Using {path:path} captures multi-slash paths completely!
+@app.api_route("/v1/{path:path}", methods=["GET", "POST"])
+async def forward_coc_request(path: str, request: Request):
     if not CONFIG_MATRIX:
         raise HTTPException(status_code=500, detail="Server configuration matrix is missing.")
     
@@ -27,26 +29,23 @@ async def forward_coc_request(endpoint_type: str, encoded_tag: str, request: Req
     coc_key = chosen_group["COC_KEY"]
     chosen_proxy = random.choice(chosen_group["Proxies"])
     
-    target_url = f"{COC_BASE_URL}/{endpoint_type}/{encoded_tag}"
+    # Reconstruct the target URL completely
+    target_url = f"{COC_BASE_URL}/v1/{path}"
     query_params = dict(request.query_params)
     
-    # 2. FIX: Only read and send the body if the request method actually uses one (like POST)
     body = None
     if request.method in ["POST", "PUT", "PATCH"]:
         body = await request.body()
-        if not body:  # If it's an empty byte string, set it to None
+        if not body:
             body = None
-    
+            
     headers = {
         "Authorization": f"Bearer {coc_key}",
-        "Accept": "application/json",
+        "Accept": "application/json"
     }
     
-    # Forward the content-type only if it exists in the original request
-    if request.headers.get("Content-Type"):
-        headers["Content-Type"] = request.headers.get("Content-Type")
-    
-    # 3. Execute the request through the bound proxy pipeline
+    # 2. Execute the request through the proxy matrix
+    # Keep timeout low so we fail gracefully before Vercel kills the function
     async with aiohttp.ClientSession() as session:
         try:
             async with session.request(
@@ -54,30 +53,24 @@ async def forward_coc_request(endpoint_type: str, encoded_tag: str, request: Req
                 url=target_url,
                 headers=headers,
                 params=query_params,
-                data=body,  # This will safely be None for GET requests
+                data=body,
                 proxy=chosen_proxy,
-                timeout=10
+                timeout=8  
             ) as coc_response:
                 
                 response_content = await coc_response.read()
                 
                 if coc_response.status == 200 and response_content:
                     json_data = json.loads(response_content)
-                    return JSONResponse(
-                        content=json_data,
-                        status_code=coc_response.status
-                    )
+                    return JSONResponse(content=json_data, status_code=200)
                 else:
-                    # Handle empty or error responses cleanly
                     try:
-                        error_data = json.loads(response_content) if response_content else {"message": "Empty response from Supercell"}
+                        error_data = json.loads(response_content) if response_content else {"message": "Empty body from Supercell"}
                     except Exception:
-                        error_data = {"error": "Could not parse response from Supercell", "raw": str(response_content)}
-                        
-                    return JSONResponse(
-                        content=error_data,
-                        status_code=coc_response.status
-                    )
+                        error_data = {"error": "Supercell returned non-JSON data", "raw": response_content.decode('utf-8', errors='ignore')}
+                    return JSONResponse(content=error_data, status_code=coc_response.status)
                 
+        except asyncio.TimeoutError:
+            return JSONResponse(content={"error": "Proxy connection timed out contacting Supercell"}, status_code=504)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Gateway Error: {str(e)}")
+            return JSONResponse(content={"error": f"Gateway Exception: {str(e)}"}, status_code=500)
