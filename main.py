@@ -1,13 +1,12 @@
 import json
 import os
 import random
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import aiohttp
 
 app = FastAPI()
 
-# 1. Safely load the matrix directly from Vercel's environment variables
 env_matrix = os.getenv("COC_CONFIG_MATRIX")
 
 if env_matrix:
@@ -16,23 +15,28 @@ else:
     CONFIG_MATRIX = []
     print("⚠️ Warning: COC_CONFIG_MATRIX environment variable not found!")
 
-# Note: We drop the "/v1" here because our catch-all path route includes the "/v1/" from the client request
-COC_BASE_URL = "https://api.clashofclans.com"
+# Base URL without trailing slashes
+COC_BASE_URL = "https://api.clashofclans.com/v1"
 
-# The "{path:path}" wildcard captures everything after the domain including all slashes!
-@app.api_route("/v1/{path:path}", methods=["GET", "POST"])
-async def forward_coc_request(path: str, request: Request):
+# We use a clean endpoint /forward and accept the subpath via a query string
+@app.api_route("/forward", methods=["GET", "POST"])
+async def forward_coc_request(url: str, request: Request):
     if not CONFIG_MATRIX:
         raise HTTPException(status_code=500, detail="Server configuration matrix is missing.")
     
-    # 2. Pick a random Key block and proxy pipeline from your list
+    # 1. Pick a random Key block and proxy pipeline
     chosen_group = random.choice(CONFIG_MATRIX)
     coc_key = chosen_group["COC_KEY"]
     chosen_proxy = random.choice(chosen_group["Proxies"])
     
-    # 3. Reconstruct the clean path target URL for Supercell
-    target_url = f"{COC_BASE_URL}/v1/{path}"
+    # 2. Reconstruct clean destination URL 
+    # Safely strip any leading slashes the client passes
+    clean_subpath = url.lstrip("/")
+    target_url = f"{COC_BASE_URL}/{clean_subpath}"
+    
+    # Forward original query parameters if any (excluding our routing parameter)
     query_params = dict(request.query_params)
+    query_params.pop("url", None) 
     
     body = None
     if request.method in ["POST", "PUT", "PATCH"]:
@@ -45,7 +49,6 @@ async def forward_coc_request(path: str, request: Request):
         "Accept": "application/json"
     }
     
-    # 4. Execute the request through the bound proxy pipeline
     async with aiohttp.ClientSession() as session:
         try:
             async with session.request(
@@ -55,7 +58,7 @@ async def forward_coc_request(path: str, request: Request):
                 params=query_params,
                 data=body,
                 proxy=chosen_proxy,
-                timeout=10
+                timeout=12
             ) as coc_response:
                 
                 response_content = await coc_response.read()
