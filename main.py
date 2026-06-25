@@ -15,21 +15,21 @@ else:
     CONFIG_MATRIX = []
     print("⚠️ Warning: COC_CONFIG_MATRIX environment variable not found!")
 
-# Note the base URL drops the "/v1" since the path will include it!
+# Note: We drop the "/v1" from the base URL because the {path:path} match includes it!
 COC_BASE_URL = "https://api.clashofclans.com"
 
-# Using {path:path} captures multi-slash paths completely!
+# The "{path:path}" wildcard safely captures complex nested routes with multiple slashes
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
 async def forward_coc_request(path: str, request: Request):
     if not CONFIG_MATRIX:
         raise HTTPException(status_code=500, detail="Server configuration matrix is missing.")
     
-    # 1. Pick a random Key block and proxy pipeline
+    # 1. Select a pipeline from your dynamic matrix
     chosen_group = random.choice(CONFIG_MATRIX)
     coc_key = chosen_group["COC_KEY"]
     chosen_proxy = random.choice(chosen_group["Proxies"])
     
-    # Reconstruct the target URL completely
+    # 2. Reconstruct the clean path target URL
     target_url = f"{COC_BASE_URL}/v1/{path}"
     query_params = dict(request.query_params)
     
@@ -44,8 +44,6 @@ async def forward_coc_request(path: str, request: Request):
         "Accept": "application/json"
     }
     
-    # 2. Execute the request through the proxy matrix
-    # Keep timeout low so we fail gracefully before Vercel kills the function
     async with aiohttp.ClientSession() as session:
         try:
             async with session.request(
@@ -55,7 +53,7 @@ async def forward_coc_request(path: str, request: Request):
                 params=query_params,
                 data=body,
                 proxy=chosen_proxy,
-                timeout=8  
+                timeout=10
             ) as coc_response:
                 
                 response_content = await coc_response.read()
@@ -70,7 +68,5 @@ async def forward_coc_request(path: str, request: Request):
                         error_data = {"error": "Supercell returned non-JSON data", "raw": response_content.decode('utf-8', errors='ignore')}
                     return JSONResponse(content=error_data, status_code=coc_response.status)
                 
-        except asyncio.TimeoutError:
-            return JSONResponse(content={"error": "Proxy connection timed out contacting Supercell"}, status_code=504)
         except Exception as e:
             return JSONResponse(content={"error": f"Gateway Exception: {str(e)}"}, status_code=500)
