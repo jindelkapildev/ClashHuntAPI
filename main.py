@@ -1,8 +1,8 @@
 import json
 import os
 import random
-import asyncio  # Added missing import so it doesn't crash on TimeoutError
-from fastapi import FastAPI, HTTPException, Request, Response
+import asyncio
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import aiohttp
 
@@ -18,26 +18,49 @@ else:
 
 COC_BASE_URL = "https://api.clashofclans.com"
 
-# Stack decorators to accept both route structures seamlessly
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
 @app.api_route("/proxy/{path:path}", methods=["GET", "POST"])
-async def forward_coc_request(path: str, request: Request):
+@app.api_route("/proxy", methods=["GET", "POST"])  # Added to catch /proxy directly without 307 redirect loops
+async def forward_coc_request(request: Request, path: str = ""):
     if not CONFIG_MATRIX:
         raise HTTPException(status_code=500, detail="Server configuration matrix is missing.")
     
+    query_params = dict(request.query_params)
+    
+    # --- SMART PATH RECONSTRUCTION ---
+    # Check if client passed the endpoint details inside Search Params instead of the URL path
+    if not path or path.strip("/") == "":
+        endpoint = query_params.pop("endpoint", None)
+        tag = query_params.pop("tag", None)
+        suffix = query_params.pop("suffix", None)
+        
+        if endpoint:
+            # Reconstruct: v1/clans/%232LRGQ2L9L/currentwar
+            constructed_path = f"v1/{endpoint}"
+            if tag:
+                # Tags must have their '#' encoded or cleaned up safely
+                clean_tag = tag.replace("#", "%23")
+                constructed_path += f"/{clean_tag}"
+            if suffix:
+                constructed_path += f"/{suffix}"
+                
+            target_url = f"{COC_BASE_URL}/{constructed_path}"
+        else:
+            # Fallback if someone literally just hit `/proxy` with no params
+            return JSONResponse(content={"error": "No endpoint or path specified"}, status_code=400)
+    else:
+        # Standard path processing if called like /proxy/v1/clans
+        clean_path = path.lstrip("/")
+        if not clean_path.startswith("v1/"):
+            target_url = f"{COC_BASE_URL}/v1/{clean_path}"
+        else:
+            target_url = f"{COC_BASE_URL}/{clean_path}"
+    # ---------------------------------
+
     # 1. Pick a random Key block and proxy pipeline
     chosen_group = random.choice(CONFIG_MATRIX)
     coc_key = chosen_group["COC_KEY"]
     chosen_proxy = random.choice(chosen_group["Proxies"])
-    
-    # Clean up the path so it doesn't double-inject /v1/ if called via /proxy/v1/...
-    clean_path = path.lstrip("/")
-    if not clean_path.startswith("v1/"):
-        target_url = f"{COC_BASE_URL}/v1/{clean_path}"
-    else:
-        target_url = f"{COC_BASE_URL}/{clean_path}"
-        
-    query_params = dict(request.query_params)
     
     body = None
     if request.method in ["POST", "PUT", "PATCH"]:
@@ -57,7 +80,7 @@ async def forward_coc_request(path: str, request: Request):
                 method=request.method,
                 url=target_url,
                 headers=headers,
-                params=query_params,
+                params=query_params, # The popped items won't be duplicated here
                 data=body,
                 proxy=chosen_proxy,
                 timeout=8  
